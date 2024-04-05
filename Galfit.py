@@ -127,6 +127,7 @@ class Galfit:
         # initialize string of components to fit
         self.components = ''
         self.galfit_images = []
+        self.comp_images = []
         self.constraints_list = ''
         self.constraint = False
 
@@ -268,6 +269,10 @@ class Galfit:
         gfile = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.{num}')
         feedme_file = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.{oldnum}')
 
+        if not os.path.isfile(feedme_file):
+            print('NO SUCH FILE!!!', feedme_file)
+            return
+
         # delete old galfit file
         if os.path.isfile(gfile):
             if overwrite == True:
@@ -291,6 +296,8 @@ class Galfit:
         with open(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.feedme'), 'w') as f:
             f.write(feedme_edit)
 
+        self.comp_images.append(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/subcomps.fits'))
+
         os.chdir(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}'))
         os.system('../../../../galfit galfit.feedme')
 
@@ -308,6 +315,10 @@ class Galfit:
         # make sure galfit didn't fail
         if not os.path.isfile(im):
             print('NO SUCH FILE!!!', im)
+            return
+        
+        if not os.path.isfile(os.path.join(os.path.dirname(im), f'galfit.{num}')):
+            print('NO SUCH FILE!!!', os.path.join(os.path.dirname(im), f'galfit.{num}'))
             return
 
         # get info about fit
@@ -375,24 +386,41 @@ class Galfit:
             galfit_info['PA'] = float(lines[48].split()[1])
             return galfit_info
 
-    def plot_apertures(self, im, field, obj_id, dirname, num='01', components=2, frac_hl=0.5):
+    def plot_apertures(self, im, field, obj_id, dirname, num='01', components=['bulge', 'disk'], frac_hl=0.5):
         filt = im.split('_')[-2].upper()
+
+        # make sure galfit didn't fail
+        if not os.path.isfile(im):
+            print('NO SUCH FILE!!!', im)
+            return
+        if not os.path.isfile(os.path.join(os.path.dirname(im), f'galfit.{num}')):
+            print('NO SUCH FILE!!!', os.path.join(os.path.dirname(im), f'galfit.{num}'))
+            return
+
         galfit_info = self.get_galfit_info(im, num=num)
+        compnum = len(components)
+        if len(components) != 0:
+            im = im.replace(f'obj_{obj_id}_{filt.lower()}_imgblock{num}.fits', 'subcomps.fits')
 
         # fit elliptical apertures to the data itself
         with fits.open(im) as hdul:
-            data = hdul[1].data
+            data = hdul[0].data
+            comp_data = []
+            for i in range(compnum):
+                comp_data.append(hdul[i+1].data)
+
             bkg = Background2D(data, [5,5])
             rms = bkg.background_rms_median
             sky = bkg.background_median
         
             # now fit the elliptical annuli
             geometry = EllipseGeometry(x0=galfit_info['X'], y0=galfit_info['Y'], sma=galfit_info['HL_radius'], eps=np.sqrt(1-galfit_info['axis_ratio']**2),pa=((galfit_info['PA']+90) % 360)*np.pi/180)
-            ellipse = Ellipse(data-sky, geometry)
+            ellipse = Ellipse(data, geometry)
             try: #sometimes fit does not converge
                 isolist = ellipse.fit_image()
                 np.max(isolist.sma[isolist.intens*0==0]) # random thing to see if works
             except:
+                print('fatal error 1!!!')
                 return
         
             # convert units
@@ -410,23 +438,42 @@ class Galfit:
                 ebot[bad] = 5
         
             # fit ellipcical apertures to the model fit
-            fit = hdul[2].data
-            ellipse_fit = Ellipse(fit-sky, geometry)
-            try: # sometimes fit does not converge
+            comp_sb = []
+            isolist_sb = []
+            for fit in comp_data:
+                ellipse_fit = Ellipse(fit, geometry)
+                try: # sometimes fit does not converge
+                    isolist_fit = ellipse_fit.fit_image()
+                    isolist_sb.append(isolist_fit)
+                    np.max(isolist_fit.sma[isolist_fit.intens*0==0]) # random thing to see if works
+                except:
+                    print('fatal error 2!!!')
+                    return
+                sb_fit = zp - 2.5 * np.log10(isolist_fit.intens/ps**2)
+                comp_sb.append(sb_fit)
+
+            # total fit
+            fit = comp_data[0] + comp_data[1]
+            ellipse_fit = Ellipse(fit, geometry)
+            try:
                 isolist_fit = ellipse_fit.fit_image()
-                np.max(isolist_fit.sma[isolist_fit.intens*0==0]) # random thing to see if works
+                isolist_sb.append(isolist_fit)
+                np.max(isolist_fit.sma[isolist_fit.intens*0==0])
             except:
+                print('fatal error 3!!!')
                 return
             sb_fit = zp - 2.5 * np.log10(isolist_fit.intens/ps**2)
-            
+            comp_sb.append(sb_fit)
+
             # get residual intensity
             # calculate SB but do it once for >0 and once for <0, then plot both individually
             # also normalize it by data (if it doesn't work, try model)
-            maxnum = np.min([isolist.intens.shape, isolist_fit.intens.shape])
-            intens_res = isolist.intens[:maxnum] - isolist_fit.intens[:maxnum]
-            int_err_res = np.sqrt(isolist.int_err[:maxnum]**2 + isolist_fit.int_err[:maxnum]**2)   
-            res = intens_res / isolist_fit.intens[:maxnum]
-            nonnegative = isolist_fit.intens[:maxnum].copy()
+            maxnum = np.min([isolist.intens.shape, isolist_sb[0].intens.shape, isolist_sb[1].intens.shape])
+            intens_fit = isolist_sb[0].intens[:maxnum] + isolist_sb[1].intens[:maxnum]
+            intens_res = isolist.intens[:maxnum] - intens_fit
+            int_err_res = np.sqrt(isolist.int_err[:maxnum]**2 + isolist_sb[0].int_err[:maxnum]**2 + isolist_sb[1].int_err[:maxnum]**2)   
+            res = intens_res / intens_fit
+            nonnegative = intens_fit.copy()
             nonnegative[nonnegative <= 0] = 1
             res_err = int_err_res / nonnegative
             
@@ -437,24 +484,27 @@ class Galfit:
         
         ml2 = MultipleLocator(0.5)
             
-        ax[0].errorbar(isolist.sma*ps, sb, yerr=[etop, ebot], fmt='o', capsize=4, ms=5, color='black', label='Data')
-        ax[0].plot(isolist_fit.sma*ps, sb_fit, color='blue', label='Sersic')
-        ax[0].plot([0, np.max(isolist.sma[sb*0==0]*ps)],[sb_bkg,sb_bkg], '--', color='black', label='1$\sigma$ sky-err')
+        ax[0].errorbar(isolist.sma*ps, sb, yerr=[etop, ebot], fmt='o', capsize=4, ms=5, color='black', label='data')
         
+        for i in range(compnum):
+            ax[0].plot(isolist_sb[i].sma*ps, comp_sb[i], label=components[i])
+
+        ax[0].plot(isolist_sb[2].sma*ps, comp_sb[2], color='blue', label='model')
+
+        ax[0].plot([0, np.max(isolist.sma[sb*0==0]*ps)],[sb_bkg,sb_bkg], '--', color='black', label='1$\sigma$ sky-err')
+        ax[0].legend()
+
         ax[1].errorbar(isolist.sma[:maxnum]*ps, res, yerr=res_err, fmt='o', capsize=4, ms=5, color='black')
         ax[1].plot([0, np.max(isolist.sma[sb*0==0]*ps)],[0,0], ls='--', color='black')
         
         ax[1].set_xlabel('semimajor axis [arcsec]', fontsize=20)
         ax[0].set_ylabel('SB [mag arcsec$^{-2}$]', fontsize=15)
         ax[1].set_ylabel('residual/model intensity', fontsize=15)
-        ax[0].text(galfit_info['HL_radius']*ps/200*frac_hl, sb_bkg-0.4, '$1\sigma$ sky-err', fontsize=15)
-        ax[0].text(galfit_info['HL_radius']*ps/3*frac_hl, np.min(sb_fit[sb_fit*0==0])+1.3, 'data \& model', fontsize=15)
-        ax[0].set_ylim(np.min(sb_fit[sb_fit*0==0]), np.max(sb_fit[sb_fit*0==0]))
-        ax[1].set_ylim(np.min(res[isolist.sma*ps < galfit_info['HL_radius']*ps*frac_hl]), np.max(res[isolist.sma*ps < galfit_info['HL_radius']*ps*frac_hl]))
+        ax[0].set_ylim(1.1*np.max(sb_fit[sb_fit*0==0]), 0.9*np.min(sb_fit[sb_fit*0==0]))
+        ax[1].set_ylim(1.1*np.min(res[isolist.sma[:maxnum]*ps < galfit_info['HL_radius']*ps*frac_hl]), 1.1*np.max(res[isolist.sma[:maxnum]*ps < galfit_info['HL_radius']*ps*frac_hl]))
         ax[0].set_xlim(isolist.sma[1]*ps, galfit_info['HL_radius']*ps*frac_hl)
-        ax[0].set_xscale('log')
-        ax[1].set_xscale('log')
-        ax[0].invert_yaxis()
+        #ax[0].set_xscale('log')
+        #ax[1].set_xscale('log')
         ax[0].yaxis.set_minor_locator(ml2)
 
         fig.suptitle(f'Field: {field.upper()}, Object: {obj_id}, Filter: {filt}, '+r'$\chi^2_\nu=$'+str(galfit_info['chi2']), fontsize=25)
@@ -467,7 +517,7 @@ class Galfit:
         
         fig.savefig(os.path.join(dirname, f'galfit_apertures_{field}_{obj_id}_{filt}.pdf'))
 
-    def plot_all_apertures(self, obj_id, field, num='01', frac_hl=1.5):
+    def plot_all_apertures(self, obj_id, field, num='01', components=['bulge', 'disk'], frac_hl=1.5):
         # make aperture plots of galfit run 1 results
         dirname = os.path.join(self.object_dir, f'obj_{obj_id}/sersic_results')
 
@@ -475,4 +525,4 @@ class Galfit:
             os.mkdir(dirname)
 
         for im in tqdm(self.galfit_images, desc='Making plots...'):
-            self.plot_apertures(im, field, obj_id, dirname, num=num, frac_hl=frac_hl)
+            self.plot_apertures(im, field, obj_id, dirname, num=num, components=components, frac_hl=frac_hl)
