@@ -24,16 +24,15 @@ import MakeCats
 
 class Galfit:
 
-    def __init__(self, field, images, cats, master_cat, img_size=200, psf_size=150, star=False,
+    def __init__(self, field, sci_images, err_images, cats, master_cat, img_size=100, psf_size=100,
                  image_dir='mosaics', object_dir='objects', psf_dir='psfs', cat_dir='cats'):
         self.field = field
-        self.images = images
-        self.images = images
+        self.sci_images = sci_images
+        self.err_images = err_images
         self.cats = cats
         self.master_cat = Table.read(master_cat, format='ascii')
         self.img_size = img_size
         self.psf_size = psf_size
-        self.star = star
         self.image_dir = image_dir
         self.object_dir = object_dir
         self.psf_dir = psf_dir
@@ -52,8 +51,8 @@ class Galfit:
         ###   
         ### make smaller psf images for convolution
         ###
-        for im in tqdm(self.images, desc='Creating PSF cutouts...'):
-            filt = im.split('_')[-4]
+        for im in tqdm(self.sci_images, desc='Creating PSF cutouts...'):
+            filt = im.split('_')[-2]
             psf = os.path.join(self.psf_dir, f'{filt}_webbpsf.fits')
 
             with fits.open(psf) as hdul:
@@ -82,36 +81,49 @@ class Galfit:
         if not os.path.exists(os.path.join(self.object_dir, f'obj_{obj_id}')):
             os.mkdir(os.path.join(self.object_dir, 'obj_'+str(obj_id)))
             
-        for im in tqdm(self.images, desc='Creating object cutouts...'):
-            filt = im.split('_')[-4]
+        for sci, err in tqdm(zip(self.sci_images, self.err_images), desc='Creating object cutouts...'):
+            filt = sci.split('_')[-2]
             if not os.path.exists(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}')):
                 os.mkdir(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}'))
 
-            # make sci and err/sigma images
-            with fits.open(im) as hdul:
+            # make sci images
+            with fits.open(sci) as hdul:
                 # use same header for both extensions--science header has WCS info
                 header = hdul['sci'].header[:]
                 self.field_RA = header['RA_V1']
                 self.field_DEC = header['DEC_V1']
 
-                # save science for fitting and err for uncertainty ("sigma image")
-                for extension in 'sci err'.split():
-                    output_image = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_{extension}.fits')
-                    header['EXTNAME'] = extension
-                    header['EXPTIME'] = 1 # from galfit readme
+                output_image = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_sci.fits')
+                header['EXPTIME'] = 1 # from galfit readme
 
-                    # cutout the data and fix the WCS pixel
-                    data = hdul[extension].data[int(y_obj-self.img_size):int(y_obj+self.img_size), int(x_obj-self.img_size):int(x_obj+self.img_size)]
-                    header['CRPIX1'] = y_obj
-                    header['CRPIX2'] = x_obj
-                    header['CRVAL1'] = dec_obj
-                    header['CRVAL2'] = ra_obj
+                # cutout the data and fix the WCS pixel
+                data = hdul['sci'].data[int(y_obj-self.img_size):int(y_obj+self.img_size), int(x_obj-self.img_size):int(x_obj+self.img_size)]
+                header['CRPIX1'] = y_obj
+                header['CRPIX2'] = x_obj
+                header['CRVAL1'] = dec_obj
+                header['CRVAL2'] = ra_obj
 
-                    # save cutout
-                    fits.writeto(output_image, data, header, overwrite=overwrite)
+                fits.writeto(output_image, data, header, overwrite=overwrite)
+
+            # make err images
+            with fits.open(err) as hdul:
+                # use same header for both extensions--science header has WCS info
+                header = hdul['err'].header[:]
+
+                output_image = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_err.fits')
+                header['EXPTIME'] = 1 # from galfit readme
+
+                # cutout the data and fix the WCS pixel
+                data = hdul['err'].data[int(y_obj-self.img_size):int(y_obj+self.img_size), int(x_obj-self.img_size):int(x_obj+self.img_size)]
+                header['CRPIX1'] = y_obj
+                header['CRPIX2'] = x_obj
+                header['CRVAL1'] = dec_obj
+                header['CRVAL2'] = ra_obj
+
+                fits.writeto(output_image, data, header, overwrite=overwrite)
 
             # make mask file
-            segm = os.path.join(self.cat_dir, f'{self.field.upper()}_{filt.upper()}_segm.fits')
+            segm = os.path.join(self.cat_dir, f'{self.field}_{filt.upper()}_segm.fits')
             filt_obj_id = self.master_cat[obj_id-1][f'{filt.upper()}_num']
 
             with fits.open(segm) as hdul:
@@ -134,24 +146,24 @@ class Galfit:
     ###
     ### begin galfit parameters
     ###
-    def galfit_params(self, obj_id, filt, zp=28.0865):
+    def galfit_params(self, obj_id, filt, zp=28.0865, num='01'):
         # test image
         proj = abs(np.cos(self.field_DEC*2*math.pi/360)) # projection due to target RA
         # write some parameters for feedme file
         params = {}
         params['A'] = f'obj_{obj_id}_{filt}_sci.fits'                          # Input data image (FITS file)
-        params['B'] = f'obj_{obj_id}_{filt}_imgblock01.fits'                   # Output data image block
+        params['B'] = f'obj_{obj_id}_{filt}_imgblock{num}.fits'                   # Output data image block
         params['C'] = f'obj_{obj_id}_{filt}_err.fits'                          # Sigma image name (made from data if blank or "none") 
-        params['D'] = f'../../../psfs/{filt}_webbpsf_cutout.fits'              # Input PSF image and (optional) diffusion kernel
+        params['D'] = f'../../../../psfs/{self.field[4:]}/{filt}_webbpsf_cutout.fits'              # Input PSF image and (optional) diffusion kernel
         params['E'] = 1                                                        # PSF fine sampling factor relative to data 
         params['F'] = f'obj_{obj_id}_{filt}_mask.fits'                         # Bad pixel mask (FITS image or ASCII coord list)
         
         if self.constraint == True:
-            params['G'] = 'constraints.txt'                                    # File with parameter constraints (ASCII file) 
+            params['G'] = f'constraints{num}.txt'                                    # File with parameter constraints (ASCII file) 
         else:
             params['G'] = 'none'                                               # File with parameter constraints (ASCII file) 
         params['H'] = f'1 {2*self.img_size} 1 {2*self.img_size}'               # Image region to fit (xmin xmax ymin ymax)
-        params['I'] = f'{2*self.psf_size} {2*self.psf_size}'                   # Size of the convolution box (x y)
+        params['I'] = f'{2*self.psf_size+1} {2*self.psf_size+1}'                   # Size of the convolution box (x y)
         params['J'] = zp                                                       # Magnitude photometric zeropoint 
         params['K'] = f'{0.03/proj} 0.03'                                      # Plate scale (dx dy)    [arcsec per pixel]
         params['O'] = 'regular'                                                # Display type (regular, curses, both)
@@ -229,7 +241,7 @@ class Galfit:
 
         gfile = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.{num}')
         feedme_file = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.feedme')
-        constraint_file = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/constraints.txt')
+        constraint_file = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/constraints{num}.txt')
 
         self.galfit_images.append(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits'))
 
@@ -243,7 +255,7 @@ class Galfit:
                 return os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits')
 
         # get params
-        params = self.galfit_params(obj_id, filt)
+        params = self.galfit_params(obj_id, filt, num=num)
 
         with open(feedme_file, 'w') as f:
             # write parameters to feedme file
@@ -260,10 +272,155 @@ class Galfit:
         self.components = ''
 
         os.chdir(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}'))
-        os.system('../../../../galfit galfit.feedme')
+        os.system('../../../../../galfit galfit.feedme')
 
         return os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits')
     
+    def run_single_sersic(self, obj_id, filt, num='01', overwrite=False):
+        self.components = ''
+        self.galfit_images = []
+        self.add_component(obj_id, filt, 'sersic', bulge=False)
+        return self.run(obj_id, filt, num=num, overwrite=overwrite)
+    
+    def run_psf(self, obj_id, filt, num='02', overwrite=False):
+        self.components = ''
+        self.galfit_images = []
+        self.constraint = False
+        self.add_component(obj_id, filt, 'psf')
+        return self.run(obj_id, filt, num=num, overwrite=overwrite)
+    
+    def run_double_sersic(self, obj_id, filt, num='03', oldnum='01', overwrite=False, newconstraint=True):
+        # reset some parameters
+        self.galfit_images = []
+        self.components = ''
+
+        # retrieve the resultant galfit file and feedme/constraint files
+        gfile = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.{num}')
+        old_gfile = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.{oldnum}')
+        feedme_file = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.feedme')
+        constraint_file = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/constraints{num}.txt')
+
+        # make sure constraint file exists if not being rewritten
+        if newconstraint == False and not os.path.isfile(constraint_file):
+            print(constraint_file, 'does not exist, terminating...')
+            return os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits')
+
+        self.galfit_images.append(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits'))
+
+        # delete old galfit file
+        if os.path.isfile(gfile):
+            if overwrite == True:
+                os.remove(gfile) 
+            else:
+                print(f'{gfile} already exists')
+                return os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits')
+
+        # retrieve old galfit results
+        with open(old_gfile, 'r') as f:
+            galfit_results = f.readlines()
+
+        # write old galfit results and new component to feedme
+        with open(feedme_file, 'w') as f:
+            # replace a couple parameters
+            for line in galfit_results:                    
+                if 'B)' in line:
+                    line = line.replace(f'imgblock{oldnum}', f'imgblock{num}')
+                if 'G)' in line:
+                    line = line.replace(f'constraints{oldnum}.txt', f'constraints{num}.txt')
+                if '1)' in line:
+                    posline = line
+                if '10)' in line:
+                    paline = line
+                f.write(line)
+            # add sersic component
+            self.add_component(obj_id, filt, 'sersic', bulge=True)
+            # edit the component to have equal position and pa then write
+            for line in self.components.split('\n'):
+                if '1)' in line:
+                    line = posline
+                elif '10)' in line:
+                    line = paline
+                f.write(line + '\n')
+            
+        # write new constraints
+        if newconstraint == True:
+            with open(constraint_file, 'w') as f:
+                f.write(self.constraints_list)
+
+        # now reset components list
+        self.components = ''
+        self.constraints_list = ''
+
+        # run
+        os.chdir(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}'))
+        os.system('../../../../../galfit galfit.feedme')
+
+        return os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits')
+
+    def run_sersic_psf(self, obj_id, filt, num='04', oldnum='01', overwrite=False, newconstraint=True):
+        # reset some parameters
+        self.galfit_images = []
+        self.components = ''
+
+        # retrieve the resultant galfit file and feedme/constraint files
+        gfile = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.{num}')
+        old_gfile = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.{oldnum}')
+        feedme_file = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.feedme')
+        constraint_file = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/constraints{num}.txt')
+
+        # make sure constraint file exists if not being rewritten
+        if newconstraint == False and not os.path.isfile(constraint_file):
+            print(constraint_file, 'does not exist, terminating...')
+            return os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits')
+
+        self.galfit_images.append(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits'))
+
+        # delete old galfit file
+        if os.path.isfile(gfile):
+            if overwrite == True:
+                os.remove(gfile) 
+            else:
+                print(f'{gfile} already exists')
+                return os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits')
+
+        # retrieve old galfit results
+        with open(old_gfile, 'r') as f:
+            galfit_results = f.readlines()
+
+        # write old galfit results and new component to feedme
+        with open(feedme_file, 'w') as f:
+            # replace a couple parameters
+            for line in galfit_results:                    
+                if 'B)' in line:
+                    line = line.replace(f'imgblock{oldnum}', f'imgblock{num}')
+                if 'G)' in line:
+                    line = line.replace(f'constraints{oldnum}.txt', f'constraints{num}.txt')
+                if '1)' in line:
+                    posline = line
+                f.write(line)
+            # add sersic component
+            self.add_component(obj_id, filt, 'psf')
+            # edit the component to have equal position and pa then write
+            for line in self.components.split('\n'):
+                if '1)' in line:
+                    line = posline
+                f.write(line + '\n')
+            
+        # write new constraints
+        if newconstraint == True:
+            with open(constraint_file, 'w') as f:
+                f.write(self.constraints_list)
+
+        # now reset components list
+        self.components = ''
+        self.constraints_list = ''
+
+        # run
+        os.chdir(os.path.join(self.object_dir, f'obj_{obj_id}/{filt}'))
+        os.system('../../../../../galfit galfit.feedme')
+
+        return os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/obj_{obj_id}_{filt}_imgblock{num}.fits')
+
     def create_templates(self, obj_id, filt, num='02', oldnum='01', overwrite=False):
 
         gfile = os.path.join(self.object_dir, f'obj_{obj_id}/{filt}/galfit.{num}')
@@ -331,29 +488,34 @@ class Galfit:
             temp = hdul[2].data[(self.img_size-s):(self.img_size+s),(self.img_size-s):(self.img_size+s)]
             res = hdul[3].data[(self.img_size-s):(self.img_size+s),(self.img_size-s):(self.img_size+s)]
         
-        fig, ax = plt.subplots(1,3)
+        fig, ax = plt.subplots(1,3, sharey=True)
+        fig.subplots_adjust(wspace=0)
         fig.set_size_inches(15,5)
 
-        n = simple_norm(temp,stretch="log",percent=100-1)
-        im1 = ax[1].imshow(temp, origin="lower", norm=n, cmap="inferno")
-        ax[1].set_title('Template', fontsize=18)
-        cbar1 = ax[1].figure.colorbar(im1, ax=ax[1])
-        cbar1.ax.set_ylabel('MJy/Sr', rotation=-90, va="bottom")
-        
         n = simple_norm(im,stretch="log",percent=100-1)
-        im0 = ax[0].imshow(im, origin="lower", norm=n, cmap="inferno")
-        ax[0].set_title('Image', fontsize=18)
-        cbar0 = ax[0].figure.colorbar(im0, ax=ax[0])
-        cbar0.ax.set_ylabel('MJy/Sr', rotation=-90, va="bottom")
 
-        n = simple_norm(res,stretch="log",percent=100-2)
-        im2 = ax[2].imshow(res, origin="lower", norm=n, cmap="inferno")
-        ax[2].set_title('Residual', fontsize=18)
-        cbar2 = ax[2].figure.colorbar(im2, ax=ax[2])
-        cbar2.ax.set_ylabel('MJy/Sr', rotation=-90, va="bottom")
+        im1 = ax[1].imshow(temp, origin="lower", norm=n, cmap="inferno")
+        ax[1].text(s*0.02, s*1.87, 'template', fontsize=18, color='white')
+        ax[1].axis('off')
+        cbar_ax = fig.add_axes([0.126, 0.02, 0.773, 0.07])
+        cbar = fig.colorbar(im1, cax=cbar_ax, orientation='horizontal')
+        ticks = np.logspace(-10, np.emath.logn(1.5, n.vmax - n.vmin), 8, base=1.5) + n.vmin
+        ticks = list(ticks)
+        ticks.append(n.vmin)
+        cbar.ax.set_xticks(ticks)
 
-        fig.suptitle(f'Field: {field.upper()}, Object: {obj_id}, Filter: {filt}, '+r'$\chi^2_\nu=$'+str(chi2_red), fontsize=25)
-        fig.savefig(os.path.join(dirname, f'galfit_{field}_{obj_id}_{filt}.pdf'))
+        cbar.ax.set_xlabel('MJy sr$^{-1}$', fontsize=15)
+        
+        ax[0].imshow(im, origin="lower", norm=n, cmap="inferno")
+        ax[0].text(s*0.02, s*1.85, 'image', fontsize=18, color='white')
+        ax[0].axis('off')
+
+        ax[2].imshow(res, origin="lower", norm=n, cmap="inferno")
+        ax[2].text(s*0.02, s*1.85, 'residual', fontsize=18, color='white')
+        ax[2].axis('off')
+
+        fig.suptitle(f'Field: {field}, Object: {obj_id}, Filter: {filt}, '+r'$\chi^2_\nu=$'+str(chi2_red), fontsize=25)
+        fig.savefig(os.path.join(dirname, f'galfit_{field}_{obj_id}_{filt}.pdf'), bbox_inches='tight')
 
     def plot_all(self, obj_id, field, num='01', s=None):
 
@@ -366,7 +528,7 @@ class Galfit:
             os.mkdir(savedir)
 
         for im in tqdm(self.galfit_images, desc='Making plots...'):
-            self.plot_galfit(im, field, obj_id, savedir, num='01', s=s)
+            self.plot_galfit(im, field, obj_id, savedir, num=num, s=s)
 
     ###
     ### Get fit info from galfit files
