@@ -192,9 +192,24 @@ class Galfit:
             # get some object parameters
             cat = Table.read(goodcat, format='ascii')
             onum = self.master_cat[f'{filt.upper()}_num'][obj_id-1]
-            hlr = float(cat['FWHM_IMAGE'][cat['NUMBER'] == onum]) / 3 # rough conversion from FWHM to half light radius
-            ar = float(cat['B_IMAGE'][cat['NUMBER'] == onum] / cat['A_IMAGE'][cat['NUMBER'] == onum])
-            pa = float(cat['THETA_IMAGE'][cat['NUMBER'] == onum])
+
+            # if object is not detected in a filter
+            if onum == 0:
+                for cat2 in self.cats:
+                    goodcat2 = Table.read(cat2, format='ascii')
+                    filt = cat2.split('_')[-2]
+                    onum2 = self.master_cat[f'{filt.upper()}_num'][obj_id-1]
+                    if onum2 != 0:
+                        break
+
+                hlr = float(goodcat2['FWHM_IMAGE'][goodcat2['NUMBER'] == onum2]) / 3 # rough conversion from FWHM to half light radius
+                ar = float(goodcat2['B_IMAGE'][goodcat2['NUMBER'] == onum2] / goodcat2['A_IMAGE'][goodcat2['NUMBER'] == onum2])
+                pa = float(goodcat2['THETA_IMAGE'][goodcat2['NUMBER'] == onum2])
+                
+            else:
+                hlr = float(cat['FWHM_IMAGE'][cat['NUMBER'] == onum]) / 3 # rough conversion from FWHM to half light radius
+                ar = float(cat['B_IMAGE'][cat['NUMBER'] == onum] / cat['A_IMAGE'][cat['NUMBER'] == onum])
+                pa = float(cat['THETA_IMAGE'][cat['NUMBER'] == onum])
 
             if bulge == False:
                 self.components += ("\n# Object number: 1\n"
